@@ -21,6 +21,11 @@ dup_tracker = defaultdict(lambda: deque(maxlen=7))
 channel_logs = defaultdict(list)
 ban_logs = defaultdict(list)
 
+# İstatistik Hafızası (Stat Tracker)
+user_msg_count = defaultdict(int)        # Kullanıcı bazlı mesaj sayısı
+user_voice_time = defaultdict(int)       # Kullanıcı ses süresi (saniye)
+user_voice_join_ts = {}                  # Sese giriş zaman damgası
+
 # AFK Hafızası
 afk_users = {}
 spam_koruma_aktif = True
@@ -53,12 +58,15 @@ async def remove_all_roles(member: discord.Member, reason: str):
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} sıfırdan başarıyla başlatıldı ve aktif!')
+    print(f'{bot.user} başarıyla başlatıldı ve stat sistemi aktif!')
 
 @bot.event
 async def on_message(message):
     if message.author.bot or not message.guild:
         return
+
+    # Stat: Mesaj Sayısını Artır
+    user_msg_count[message.author.id] += 1
 
     content_lower = message.content.lower().strip()
 
@@ -105,7 +113,7 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # ==========================================
-# LOG OLAYLARI (EVENTS)
+# LOG OLAYLARI VE SES SÜRESİ HESAPLAMA
 # ==========================================
 
 @bot.event
@@ -198,6 +206,18 @@ async def on_member_ban(guild, user):
 async def on_voice_state_update(member, before, after):
     if member.bot:
         return
+    
+    now_ts = datetime.datetime.utcnow().timestamp()
+
+    # Ses İstatistiği Süre Hesabı
+    if before.channel is None and after.channel is not None:
+        user_voice_join_ts[member.id] = now_ts
+    elif before.channel is not None and after.channel is None:
+        if member.id in user_voice_join_ts:
+            duration = int(now_ts - user_voice_join_ts.pop(member.id))
+            user_voice_time[member.id] += duration
+
+    # Log Gönderimi
     embed = None
     if before.channel is None and after.channel is not None:
         embed = discord.Embed(title="🔊 Sese Katıldı", color=discord.Color.green(), timestamp=datetime.datetime.utcnow())
@@ -217,7 +237,52 @@ async def on_voice_state_update(member, before, after):
         await send_log(member.guild, embed)
 
 # ==========================================
-# KOMUTLAR
+# STAT VE SU KOMUTLARI (!st ve !su)
+# ==========================================
+
+@bot.command()
+async def st(ctx, member: discord.Member = None):
+    """Kullanıcı İstatistikleri (!st)"""
+    target = member or ctx.author
+    msgs = user_msg_count[target.id]
+    
+    # Ses Süresi Hesabı
+    total_sec = user_voice_time[target.id]
+    if target.id in user_voice_join_ts:
+        total_sec += int(datetime.datetime.utcnow().timestamp() - user_voice_join_ts[target.id])
+    
+    hours = total_sec // 3600
+    minutes = (total_sec % 3600) // 60
+
+    embed = discord.Embed(title=f"📊 Kullanıcı İstatistikleri: {target.display_name}", color=discord.Color.purple(), timestamp=datetime.datetime.utcnow())
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="✉️ Toplam Mesaj", value=f"**{msgs}** mesaj", inline=True)
+    embed.add_field(name="🔊 Ses Kanalı Süresi", value=f"**{hours} saat {minutes} dk**", inline=True)
+    embed.add_field(name="📅 Katılım Tarihi", value=target.joined_at.strftime("%d/%m/%Y"), inline=False)
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def su(ctx):
+    """Sunucu İstatistikleri ve Durumu (!su)"""
+    g = ctx.guild
+    text_channels = len(g.text_channels)
+    voice_channels = len(g.voice_channels)
+    total_members = g.member_count
+    online_members = sum(1 for m in g.members if m.status != discord.Status.offline)
+
+    embed = discord.Embed(title=f"🛡️ Sunucu İstatistikleri: {g.name}", color=discord.Color.gold(), timestamp=datetime.datetime.utcnow())
+    if g.icon:
+        embed.set_thumbnail(url=g.icon.url)
+    embed.add_field(name="👥 Toplam Üye", value=f"**{total_members}**", inline=True)
+    embed.add_field(name="🟢 Aktif Üye", value=f"**{online_members}**", inline=True)
+    embed.add_field(name="👑 Sunucu Sahibi", value=g.owner.mention if g.owner else "Bilinmiyor", inline=True)
+    embed.add_field(name="💬 Yazı Kanalları", value=f"**{text_channels}** kanal", inline=True)
+    embed.add_field(name="🔊 Ses Kanalları", value=f"**{voice_channels}** kanal", inline=True)
+    embed.add_field(name="🎭 Rol Sayısı", value=f"**{len(g.roles)}** rol", inline=True)
+    await ctx.send(embed=embed)
+
+# ==========================================
+# DİĞER KOMUTLAR
 # ==========================================
 
 @bot.command()
@@ -288,23 +353,6 @@ async def unban(ctx, user_id: int):
     user = await bot.fetch_user(user_id)
     await ctx.guild.unban(user)
     await ctx.send(f'**{user.name}** yasaklaması kaldırıldı.')
-
-@bot.command(name="sunucu-bilgi")
-async def sunucu_bilgi(ctx):
-    g = ctx.guild
-    embed = discord.Embed(title=f"{g.name} Bilgileri", color=discord.Color.blue())
-    embed.add_field(name="Üye Sayısı", value=str(g.member_count))
-    embed.add_field(name="Sunucu Sahibi", value=str(g.owner))
-    embed.add_field(name="Kuruluş", value=g.created_at.strftime("%d/%m/%Y"))
-    await ctx.send(embed=embed)
-
-@bot.command(name="kisi-bilgi")
-async def kisi_bilgi(ctx, member: discord.Member = None):
-    member = member or ctx.author
-    embed = discord.Embed(title=f"{member.name} Bilgileri", color=discord.Color.green())
-    embed.add_field(name="Sunucuya Katılım", value=member.joined_at.strftime("%d/%m/%Y"))
-    embed.add_field(name="Hesap Açılış", value=member.created_at.strftime("%d/%m/%Y"))
-    await ctx.send(embed=embed)
 
 @bot.command()
 @commands.has_permissions(administrator=True)
